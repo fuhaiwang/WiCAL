@@ -32,5 +32,14 @@ RUN main_52G.m in MATLAB without any issues.
 
 
 
+@article{wang2025wical,
+  title={WiCAL: Accurate Wi-Fi-based 3D localization enabled by collaborative antenna arrays},
+  author={Wang, Fuhai and Li, Zhe and Xiong, Rujing and Mi, Tiebin and Qiu, Robert Caiming},
+  journal={IEEE Journal on Selected Areas in Communications},
+  year={2025},
+  publisher={IEEE}
+}
+
+
 
 
