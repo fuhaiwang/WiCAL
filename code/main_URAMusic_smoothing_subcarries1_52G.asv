@@ -1,0 +1,699 @@
+clc; clear; close all;  
+
+xx = 1.97:-0.2:0.17;
+yy = 2:-0.2:-2;
+zz = 2;
+
+[X,Y,Z] = meshgrid(xx,yy,zz);
+
+[azimuth,elevation,r] = cart2sph(X-0.97,Y,Z);
+theta_gt = 90-rot90(elevation.',2)/pi*180;
+phi_gt = rot90(azimuth,1)/pi*180;
+
+figure 
+heatmap(theta_gt)
+set(gcf,'Position',[800,100,900,400])
+title('theta');
+
+figure 
+heatmap(phi_gt)
+set(gcf,'Position',[800,600,900,400])
+title('phi');
+
+% 定义列区间（顺序必须和原来一致）
+colRanges = {
+    8:11,   % 
+    4:7,    %
+    1:3,    % 
+    18:21,  %
+    14:17,  % 
+    12:13   %
+};
+
+theta_vecs = cell(1,6);
+phi_vecs   = cell(1,6);
+
+for i = 1:6
+    cols = colRanges{i};
+
+    % theta
+    theta_tmp = rot90(flipud(theta_gt(:, cols)), 1);
+    theta_vecs{i} = theta_tmp(:);
+
+    % phi
+    phi_tmp = rot90(flipud(phi_gt(:, cols)), 1);
+    phi_vecs{i} = phi_tmp(:);
+end
+
+% theta_phi_gt 
+theta_phi_gt = [
+    theta_vecs{1}, phi_vecs{1};
+    theta_vecs{2}, phi_vecs{2};
+    theta_vecs{3}, phi_vecs{3};
+    theta_vecs{4}, phi_vecs{4};
+    theta_vecs{5}, phi_vecs{5};
+    theta_vecs{6}, phi_vecs{6}
+];
+% save('.\data\test.2024.9.5\theta_phi_gt.mat', 'theta_phi_gt');
+%%  % Data used for calibaration
+read_root_path = '.\data\test.2024.9.5\'; 
+files1 = dir([char(strcat(read_root_path)), '21_1.1.dat']); 
+
+mark_p_coloc = zeros(210,2);
+mark_p_MUSIC_ss = zeros(210,2);
+mark_p_MUSIC_ss_non = zeros(210,2);
+mark_peak_SPICE  = zeros(210,2);
+mark_peak_SPICE_N = zeros(210,2);
+mark_p_MUSIC_imusic_non = zeros(210,2);
+mark_p_MUSIC_imusic = zeros(210,2);
+mark_p_MUSIC_non_music = zeros(210,2);
+mark_p_MUSIC_music = zeros(210,2);
+
+tic
+for i = 1:5    % 1-190 21-1.1.dat  ,  191-210 21_1-6.dat  202
+    disp(i)
+    tic
+    files_1 = dir([char(strcat(read_root_path)), num2str(i), '_1.dat']);  % 带估计数据 
+    %% data loader ： 输出最原始的csi数据
+    disp("1. Is loading...");
+    [csi_all] = data_loader(read_root_path,files_1);
+    %% 初始相位：输出12天线依次初始的参数，维度[3*30]，用于CSI数据校准 
+    if i >= 191
+        files1 = dir([char(strcat(read_root_path)), '21_1.2.dat']);  % 校准用数据  
+    end
+    disp("2. Is computing init_phase_dif...");
+    init_phase_cumulant = init_antenna_subcarrier_phase_dif(read_root_path,files1); % 包含了 天线线长 和 初始相位差。6*3*30
+    %% 多包获取与校准
+    disp("3. Is calibrating...");
+    temp = 1;
+    cali_num = 0;
+    for pp = 300 : 20 :500
+        %% data calibration ： 输入原始csi，输出校准后的csi（包括：天线初始相位差、初始线路相位差、包间采样相位差）
+        csi_cal = data_calibration(csi_all{pp},csi_all{pp+1000},csi_all{pp+2000},csi_all{pp+3000},csi_all{pp+4000},csi_all{pp+5000},init_phase_cumulant); % 1.去初始相位
+        if csi_cal == 0
+            cali_num = cali_num+1;
+            continue
+        end
+        csi_trace_real{temp,:} = csi_cal;
+        temp = temp + 1;
+    end
+    %% 
+    Fc = (5.2e9+5.18e9)/2;  
+    c = 3e8;
+    wavelength = c/Fc;  
+    d = wavelength/(1+sind(60));   
+    Mx = 3; 
+    My = 4; 
+    
+    N = 30;   
+    sub_freq_delta_ = 312.5e3;
+    sub_freq_delta = sub_freq_delta_*4; % kHz  
+    m0=-58:4:58;
+    num_packets = 20;
+    
+    theta_vec = 0:0.5:90;     % 俯仰角  
+    phi_vec = -180:0.5:180;   % 方位角  
+    theta_vec_spice=0:1:90;  
+    phi_vec_spice = -180:1:180;
+
+    Q = length(theta_vec)*length(phi_vec);
+    B = sub_freq_delta*N; 
+    ToF = 1/(2*B);
+    d_res = ToF*c;
+    tau_vec = (1:1:20)*(d_res/10/c);
+    
+    [csi_y_N] = cook_csi(csi_trace_real, Mx, My, N);
+
+    R = zeros(30,Mx*My,Mx*My);
+    for kk=1:30
+        R(kk,:,:) = csi_y_N(kk:30:end,:)*csi_y_N(kk:30:end,:)'/size(csi_y_N, 2);
+    end
+    Ry_N = squeeze(mean(R,1));
+
+
+    csi_y = csi_y_N(15:30:end,:);
+    if ndims(csi_y) == 3
+            [xx,yy] = size(squeeze(csi_y(1,:,:)));
+            Ry_all = zeros(P,xx,xx);
+            for p = 1:P
+                csi_y_ = squeeze(csi_y(p,:,:));
+                Ry_all(p,:,:) = (csi_y_ * csi_y_')/size(csi_y_,2);  
+            end
+            Ry = squeeze(sum(Ry_all,1))./size(Ry_all, 1);
+    else
+        Ry = (csi_y * csi_y')/size(csi_y, 2); 
+    end
+    Rx1 = Ry; 
+
+    smoothed_csi1 = smooth_csi_y(csi_y, Mx, My, 1);
+    P = size(smoothed_csi1,1);
+    if ndims(smoothed_csi1) == 3
+        [xx,yy] = size(squeeze(smoothed_csi1(1,:,:)));
+        Ry_all = zeros(P,xx,xx);
+        for p = 1:P
+            smoothed_csi_y_ = squeeze(smoothed_csi1(p,:,:));
+            Ry_all(p,:,:) = (smoothed_csi_y_ * smoothed_csi_y_')/size(smoothed_csi_y_,2); 
+        end
+        Ry_ss1 = squeeze(sum(Ry_all,1))./size(Ry_all, 1);
+    end
+
+    theta_in = [17.7]/180*pi;      % 此算法在theta角度越大时越不准确。因为虚拟线阵时kr受到theta角度值影响，越来越小。
+    phi_in   = [-90]/180*pi;  
+    l_in     = [2];                % fen  
+    source_num = length(theta_in); 
+    tau = l_in/c;
+    Coherent_signal_flag = 1;  % 0 非相干，1 相干 
+    csi_trace_ = OFDM_data_URA_generation(phi_in, theta_in, l_in, d, wavelength, Fc, sub_freq_delta_, m0, Mx, My, N, num_packets, Coherent_signal_flag);
+    % 去斜
+    exsample_csi = csi_trace_{1};
+
+    % CS
+    % [p_SR] = URA_sparse_reconstruction(csi_y, Mx, My, d, wavelength, theta_vec,phi_vec);
+%     %
+    SubCarrInd = m0;
+%     [p_MUSIC_ss] = URA_ss_wfh(csi_trace_real, Mx, My, Fc,sub_freq_delta_,d, theta_vec,phi_vec,source_num,tau_vec,SubCarrInd);  %paper
+    [p_MUSIC_ss_non] = URA_ss_non_wfh(csi_trace_real, Mx, My, Fc,sub_freq_delta_,d, theta_vec,phi_vec,source_num,tau_vec,SubCarrInd);
+% 
+%     iters = 15;    % 这里都没有使用子载波数据，因为spice传统的就是没有使用。
+%     [p_MUSIC_spice] = URA_ss_SPICE_wfh(Ry_ss1,Mx,My,d,wavelength,theta_vec_spice,phi_vec_spice,iters);   % 
+%     [p_MUSIC_spice_N] = URA_SPICE_wfh(Ry_N,Mx,My,d,wavelength,theta_vec_spice,phi_vec_spice,iters);     % N都得用，且不平滑。  
+% 
+% 
+%     [p_COLOC] = URA_COLOC_USTC(Ry,csi_y,Mx,My,d,wavelength,theta_vec_spice,phi_vec_spice,iters);
+% 
+% %     [p_MUSIC_tmusic_non] = URA_T_Music_non_wfh(csi_trace_real, Mx, My, Fc,sub_freq_delta_,d, theta_vec,phi_vec,source_num,tau_vec,SubCarrInd);
+%     % I-SSMUSIC使用了 子载波，是做了平均。
+%     [p_MUSIC_imusic_non] = URA_I_Music_non_wfh(csi_trace_real, Mx, My, Fc, sub_freq_delta_, d, theta_vec,phi_vec,source_num,tau_vec,SubCarrInd);
+%     [p_MUSIC_imusic] = URA_I_Music_wfh(csi_trace_real, Mx, My, Fc,sub_freq_delta_,d, theta_vec,phi_vec,source_num,tau_vec,SubCarrInd);  % 最好！！！！！
+% 
+%     
+%     [p_MUSIC_non_music] = URA_Music_non_wfh(csi_trace_real, Mx, My, Fc,sub_freq_delta_,d, theta_vec,phi_vec,source_num,tau_vec,SubCarrInd);
+%     [p_MUSIC_music] = URA_Music_wfh(csi_trace_real, Mx, My, Fc,sub_freq_delta_,d, theta_vec,phi_vec,source_num,tau_vec,SubCarrInd);
+%%
+    figure
+    s = surf(phi_vec,theta_vec,  10 * ((p_MUSIC_ss_non(:,:,1))));  % 左为行数，右为列数。
+    s.EdgeColor = 'none';
+    axis tight; 
+    set(gca, 'FontSize', 12); 
+    xlabel('$\phi$ [in deg]', 'Interpreter', 'latex', 'FontSize',15)
+    ylabel('$\Theta$ [in deg]', 'Interpreter', 'latex', 'FontSize',15)
+    title('$\tau$','Interpreter','latex');
+    %%
+    % figure
+    % s = surf(phi_vec_spice,theta_vec_spice,  10 * ((p_COLOC(:,:))));  % 左为行数，右为列数。
+    % s.EdgeColor = 'none';
+    % axis tight; 
+    % set(gca, 'FontSize', 12); 
+    % xlabel('$\phi$ [in deg]', 'Interpreter', 'latex', 'FontSize',15)
+    % ylabel('$\Theta$ [in deg]', 'Interpreter', 'latex', 'FontSize',15)
+    % title('$\tau$','Interpreter','latex');
+
+    % %% showing p_MUSIC
+    % Mus_SR = p_SR(:,:);
+    % [maxValue, linearIndex] = max(Mus_SR(:));
+    % [row, col] = ind2sub(size(Mus_SR), linearIndex);
+    % disp(['[ ',num2str(theta_vec_spice(row)),' , ',num2str(phi_vec_spice(col)),' ]'])
+    % mark_p_SR(i,:) = [theta_vec_spice(row), phi_vec_spice(col)];
+
+
+%     Mus_coloc = p_COLOC(:,:);
+%     [maxValue, linearIndex] = max(Mus_coloc(:));
+%     [row, col, tau_ind] = ind2sub(size(Mus_coloc), linearIndex);
+%     disp(['[ ',num2str(theta_vec_spice(row)),' , ',num2str(phi_vec_spice(col)),' ]'])
+%     mark_p_coloc(i,:) = [theta_vec_spice(row), phi_vec_spice(col)];
+% 
+% %     p_MUSIC_ss_best = maxp_MUSIC_ss(:);
+% %     Mus = 10 * log10(squeeze(p_MUSIC_ss(:,:,:)));
+%     [maxValue, linearIndex] = max(p_MUSIC_ss(:));
+%     [row, col, tau_ind] = ind2sub(size(p_MUSIC_ss), linearIndex);
+%     disp(['[ ',num2str(theta_vec(row)),' , ',num2str(phi_vec(col)),' ]'])
+%     mark_p_MUSIC_ss(i,:) = [theta_vec(row), phi_vec(col)];
+% 
+%     Mus = 10 * log10(squeeze(p_MUSIC_ss_non(:,:,:)));
+%     [maxValue, linearIndex] = max(p_MUSIC_ss_non(:));
+%     [row, col, tau_ind] = ind2sub(size(p_MUSIC_ss_non), linearIndex);
+%     disp(['[ ',num2str(theta_vec(row)),' , ',num2str(phi_vec(col)),' ]'])
+%     mark_p_MUSIC_ss_non(i,:) = [theta_vec(row), phi_vec(col)];
+% 
+% %     p_MUSIC_spice_ = reshape(p_MUSIC_spice(1:Q),[length(theta_var),length(phi_var)]);
+% %     P2_S_norm = p_MUSIC_spice/max(p_MUSIC_spice,[],'all');
+% %     figure
+% %     imagesc(phi_vec_spice,theta_vec_spice, P2_S_norm);
+%     Mus = 10 * log10(squeeze(p_MUSIC_spice(:,:)));
+%     [maxValue, linearIndex] = max(Mus(:));
+%     [row1, col1] = ind2sub(size(Mus), linearIndex);
+%     disp(['[ ',num2str(theta_vec_spice(row1)),' , ',num2str(phi_vec_spice(col1)),' ]'])
+%     mark_peak_SPICE(i,:) = [theta_vec_spice(row1), phi_vec_spice(col1)];
+% 
+%     Mus = 10 * log10(squeeze(p_MUSIC_spice_N(:,:)));
+%     [maxValue, linearIndex] = max(Mus(:));
+%     [row1, col1] = ind2sub(size(Mus), linearIndex);
+%     disp(['[ ',num2str(theta_vec_spice(row1)),' , ',num2str(phi_vec_spice(col1)),' ]'])
+%     mark_peak_SPICE_N(i,:) = [theta_vec_spice(row1), phi_vec_spice(col1)];
+% 
+%     Mus = 10 * log10(squeeze(p_MUSIC_imusic_non(:,:,:)));
+%     [maxValue, linearIndex] = max(Mus(:));
+%     [row, col, tau_ind] = ind2sub(size(Mus), linearIndex);
+%     disp(['[ ',num2str(theta_vec(row)),' , ',num2str(phi_vec(col)),' ]'])  
+%     mark_p_MUSIC_imusic_non(i,:) = [theta_vec(row), phi_vec(col)];
+% 
+%     Mus = 10 * log10(squeeze(p_MUSIC_imusic(:,:,:)));
+%     [maxValue, linearIndex] = max(Mus(:));
+%     [row, col, tau_ind] = ind2sub(size(Mus), linearIndex);
+%     disp(['[ ',num2str(theta_vec(row)),' , ',num2str(phi_vec(col)),' ]'])  
+%     mark_p_MUSIC_imusic(i,:) = [theta_vec(row), phi_vec(col)];
+%     
+%     Mus = 10 * log10(squeeze(p_MUSIC_non_music(:,:,:)));
+%     [maxValue, linearIndex] = max(Mus(:));
+%     [row, col, tau_ind] = ind2sub(size(Mus), linearIndex);
+%     disp(['[ ',num2str(theta_vec(row)),' , ',num2str(phi_vec(col)),' ]'])  
+%     mark_p_MUSIC_non_music(i,:) = [theta_vec(row), phi_vec(col)];
+% 
+%     Mus = 10 * log10(squeeze(p_MUSIC_music(:,:,:)));
+%     [maxValue, linearIndex] = max(Mus(:));
+%     [row, col, tau_ind] = ind2sub(size(Mus), linearIndex);
+%     disp(['[ ',num2str(theta_vec(row)),' , ',num2str(phi_vec(col)),' ]']) 
+%     mark_p_MUSIC_music(i,:) = [theta_vec(row), phi_vec(col)];
+%     disp(['[',num2str(theta_phi_gt(i,1)),' , ' , num2str(theta_phi_gt(i,2)),']'])
+    toc
+end
+toc
+%%
+
+
+%% 存储
+% % save('all-duibi_SR.mat');
+% load('all-duibi_SR.mat');
+% load('all-duibi_music_ssmusic_ssspice_ustc12_imusic1.mat');
+% 
+% %%
+% figure
+% s = surf(phi_vec,theta_vec,  10 * log10((p_MUSIC_imusic_non(:,:))));  % 左为行数，右为列数。
+% s.EdgeColor = 'none';
+% axis tight; 
+% set(gca, 'FontSize', 12); 
+% xlabel('$\phi$ [in deg]', 'Interpreter', 'latex', 'FontSize',15)
+% ylabel('$\Theta$ [in deg]', 'Interpreter', 'latex', 'FontSize',15)
+% title('$\tau$','Interpreter','latex');
+% %%
+% figure
+% s = surf(phi_vec_spice,theta_vec_spice,  10 * ((p_COLOC(:,:))));  % 左为行数，右为列数。
+% s.EdgeColor = 'none';
+% axis tight; 
+% set(gca, 'FontSize', 12); 
+% xlabel('$\phi$ [in deg]', 'Interpreter', 'latex', 'FontSize',15)
+% ylabel('$\Theta$ [in deg]', 'Interpreter', 'latex', 'FontSize',15)
+% title('$\tau$','Interpreter','latex');
+% 
+% %% 绘制角度分布图
+% xx = 1.97:-0.2:0.17;
+% yy = 2:-0.2:-2;
+% zz = 2;
+% 
+% [X,Y,Z] = meshgrid(xx,yy,zz);
+% 
+% [azimuth,elevation,r] = cart2sph(X-0.97,Y,Z);
+% theta_gt = 90-rot90(elevation.',2)/pi*180;
+% phi_gt = rot90(azimuth,1)/pi*180;
+% 
+% figure % 非零 就绘制
+% heatmap(theta_gt)
+% set(gcf,'Position',[800,100,900,400])
+% title('theta');
+% figure % 非零 就绘制
+% heatmap(phi_gt)
+% set(gcf,'Position',[800,600,900,400])
+% title('phi');
+% %%
+% error_distanceMUSIC_ss = abs(theta_phi_gt-mark_p_MUSIC_ss); 
+% error_distanceMUSIC_ss_non = abs(theta_phi_gt-mark_p_MUSIC_ss_non); 
+% error_distanceMUSIC_imusic_non = abs(theta_phi_gt-mark_p_MUSIC_imusic_non); 
+% error_distanceMUSIC_imusic = abs(theta_phi_gt-mark_p_MUSIC_imusic); 
+% error_distanceMUSIC_non_music = abs(theta_phi_gt-mark_p_MUSIC_non_music); 
+% error_distanceMUSIC_music = abs(theta_phi_gt-mark_p_MUSIC_music); 
+% 
+% [theta_gt_1_6_ss, phi_gt_1_6_ss] = look_figure(theta_gt,phi_gt, mark_p_MUSIC_ss);
+% [theta_gt_1_6_ss_non, phi_gt_1_6_ss_non] = look_figure(theta_gt,phi_gt, mark_p_MUSIC_ss_non);
+% [theta_gt_1_6_imusic_non, phi_gt_1_6_imusic_non] = look_figure(theta_gt,phi_gt, mark_p_MUSIC_imusic_non);
+% [theta_gt_1_6_imusic, phi_gt_1_6_imusic] = look_figure(theta_gt,phi_gt, mark_p_MUSIC_imusic); % 最好
+% [theta_gt_1_6_non_music, phi_gt_1_6_non_music] = look_figure(theta_gt,phi_gt, mark_p_MUSIC_non_music);
+% [theta_gt_1_6_music, phi_gt_1_6_music] = look_figure(theta_gt,phi_gt, mark_p_MUSIC_music);
+% 
+% [theta_gt_1_6_SPICE, phi_gt_1_6_SPICE] = look_figure(theta_gt,phi_gt, mark_peak_SPICE);
+% [theta_gt_1_6_SPICE_N, phi_gt_1_6_SPICE_N] = look_figure(theta_gt,phi_gt, mark_peak_SPICE_N);
+% 
+% [theta_gt_1_6_coloc, phi_gt_1_6_coloc] = look_figure(theta_gt,phi_gt, mark_p_coloc);
+% 
+% [theta_gt_1_6_SR, phi_gt_1_6_SR] = look_figure(theta_gt,phi_gt, mark_p_SR);
+% 
+% 
+% % figure
+% % imagesc(theta_gt_1_6_errormat1)
+% % figure
+% % imagesc(phi_gt_1_6_errormat1)
+% 
+% 
+% % 4 6 差不多， 选4. 然后 与1对比。
+% figure
+% h9=cdfplot(theta_gt_1_6_ss_non(:));
+% set(h9,'LineWidth',2.2,'LineStyle', '--', 'Color', [184 184 184]/255);
+% hold on
+% 
+% h8=cdfplot(theta_gt_1_6_non_music(:));
+% set(h8,'LineWidth',2.2,'LineStyle', '--', 'Color', [17 98 39]/255);
+% 
+% h6=cdfplot(theta_gt_1_6_SPICE(:));
+% set(h6,'LineWidth',2.2,'LineStyle', '--', 'Color', [0 114 189]/255);
+% 
+% h3=cdfplot(theta_gt_1_6_coloc(:)); 
+% set(h3,'LineWidth',2.2,'LineStyle', '--', 'Color', [0 191 191]/255);
+% 
+% hold on
+% 
+% 
+% h11=cdfplot(theta_gt_1_6_SR(:)); 
+% set(h11,'LineWidth',2.2,'LineStyle', '--', 'Color', [255,127,80]/255);
+% 
+% 
+% h1=cdfplot(theta_gt_1_6_imusic(:)); 
+% set(h1,'LineWidth',2.2,'LineStyle', '--', 'Color', [1 0 0]);
+% 
+% %
+% h10=cdfplot(phi_gt_1_6_ss_non(:));
+% set(h10,'LineWidth',2.2,'LineStyle', '-', 'Color', [184 184 184]/255);
+% 
+% h7=cdfplot(phi_gt_1_6_non_music(:));
+% set(h7,'LineWidth',2.2,'LineStyle', '-', 'Color', [17 98 39]/255);
+% 
+% h5=cdfplot(phi_gt_1_6_SPICE(:));
+% set(h5,'LineWidth',2.2,'LineStyle', '-', 'Color', [0 114 189]/255);
+% 
+% h4=cdfplot(phi_gt_1_6_coloc(:)); 
+% set(h4,'LineWidth',2.2,'LineStyle', '-', 'Color', [0 191 191]/255);
+% 
+% 
+% h12=cdfplot(phi_gt_1_6_SR(:));
+% set(h12,'LineWidth',2.2,'LineStyle', '-', 'Color', [255,127,80]/255);
+% 
+% 
+% h2=cdfplot(phi_gt_1_6_imusic(:));
+% set(h2,'LineWidth',2.2,'LineStyle', '-', 'Color', [1 0 0]);
+% 
+% box on
+% xlim([0,10]);
+% xticks(0:1:10)
+% yticks(0:0.1:1)
+% ylabel('CDF', 'Interpreter', 'latex');
+% xlabel('AoA error (degree)', 'Interpreter', 'latex');
+% set(gca,'FontSize', 16, 'FontName', 'Arial');
+% 
+% set(gcf,'Position',[100, 100, 1140, 550]);
+% % set(gca,'FontSize', 12, 'FontName', 'Arial'); 
+% set(gca, 'FontName', 'Helvetica','FontSize', 16);  
+% 
+% legend('Elevation error of SpotFi', 'Elevation error of MUSIC','Elevation error of SPICE', 'Elevation error of Co-Loc','Elevation error of $l_1$-CS','Elevation error of I-SSMUSIC' ,'Azimuth error of SpotFi','Azimuth error of MUSIC','Azimuth error of SPICE','Azimuth error of Co-Loc','Azimuth error of $l_{1}$-CS','Azimuth error of I-SSMUSIC' , 'NumColumns', 2,'Location','southeast','FontSize', 16, 'FontName', 'Arial', 'Interpreter', 'latex')
+% title('');
+% 
+% %     set(gca, 'FontName', 'Helvetica', 'FontWeight', 'bold','FontSize', 16); 
+% %     legend('Ant 1','Ant 2','Ant 3','Ant 4','Ant 5','Ant 6','Location','southeast','FontSize', 14, 'FontName', 'Helvetica')
+% ax = gcf;
+% str=strcat('.\Results\','SS-MUSIC I-MUSIC1','.pdf');
+% exportgraphics(ax, str,'ContentType','vector');
+% 
+% 
+% %% 画成两个呐？
+% % figure
+% % 
+% % h3=cdfplot(vec(theta_gt_1_6_coloc));
+% % set(h3,'LineWidth',2.2,'LineStyle', '--', 'Color', [204 204 204]/255);
+% % hold on
+% % 
+% % h9=cdfplot(vec(theta_gt_1_6_ss_non));
+% % set(h9,'LineWidth',2.2,'LineStyle', '--', 'Color', [104 104 104]/255);
+% % 
+% % h8=cdfplot(vec(theta_gt_1_6_non_music));
+% % set(h8,'LineWidth',2.2,'LineStyle', '--', 'Color', [17 98 39]/255);
+% % 
+% % h6=cdfplot(vec(theta_gt_1_6_SPICE));
+% % set(h6,'LineWidth',2.2,'LineStyle', '--', 'Color', [0 114 189]/255);
+% % 
+% % h1=cdfplot(vec(theta_gt_1_6_imusic));
+% % set(h1,'LineWidth',2.2,'LineStyle', '--', 'Color', [1 0 0]);
+% % 
+% % box on
+% % xlim([0,10]);
+% % xticks(0:1:10)
+% % yticks(0:0.1:1)
+% % ylabel('CDF');
+% % xlabel('AoA error (degree)');
+% % set(gca,'FontSize', 14, 'FontName', 'Arial');
+% % 
+% % set(gcf,'Position',[100, 100, 800, 300]);
+% % % set(gca,'FontSize', 12, 'FontName', 'Arial');
+% % set(gca, 'FontName', 'Helvetica', 'FontWeight', 'bold','FontSize', 14); 
+% % 
+% % legend('Elevation error of Co-Loc', 'Elevation error of SS-MUSIC','Elevation error of SPICE', 'Elevation error of MUSIC','Elevation error of I-SSMUSIC','Location','southeast','FontSize', 14, 'FontName', 'Arial')
+% % title('');
+% % 
+% % %     set(gca, 'FontName', 'Helvetica', 'FontWeight', 'bold','FontSize', 16); 
+% % %     legend('Ant 1','Ant 2','Ant 3','Ant 4','Ant 5','Ant 6','Location','southeast','FontSize', 14, 'FontName', 'Helvetica')
+% % ax = gcf;
+% % str=strcat('.\Results\','SS-MUSIC I-MUSIC1-1','.pdf');
+% % exportgraphics(ax, str,'ContentType','vector');
+% % 
+% % 
+% % %%
+% % figure
+% % h4=cdfplot(vec(phi_gt_1_6_errormat8));
+% % set(h4,'LineWidth',2.2,'LineStyle', '-', 'Color', [204 204 204]/255);
+% % 
+% % hold on
+% % 
+% % h10=cdfplot(vec(phi_gt_1_6_errormat2));
+% % set(h10,'LineWidth',2.2,'LineStyle', '-', 'Color', [104 104 104]/255);
+% % 
+% % h7=cdfplot(vec(phi_gt_1_6_errormat9));
+% % set(h7,'LineWidth',2.2,'LineStyle', '-', 'Color', [17 98 39]/255);
+% % 
+% % h5=cdfplot(vec(phi_gt_1_6_errormat5));
+% % set(h5,'LineWidth',2.2,'LineStyle', '-', 'Color', [0 114 189]/255);
+% % 
+% % h2=cdfplot(vec(phi_gt_1_6_errormat4));
+% % set(h2,'LineWidth',2.2,'LineStyle', '-', 'Color', [1 0 0]);
+% % 
+% % box on
+% % xlim([0,10]);
+% % xticks(0:1:10)
+% % yticks(0:0.1:1)
+% % ylabel('CDF', 'Interpreter', 'latex');
+% % xlabel('AoA error (degree)', 'Interpreter', 'latex');
+% % set(gca,'FontSize', 14, 'FontName', 'Arial');
+% % 
+% % set(gcf,'Position',[100, 100, 800, 300]);
+% % % set(gca,'FontSize', 12, 'FontName', 'Arial');
+% % set(gca, 'FontName', 'Helvetica', 'FontWeight', 'bold','FontSize', 14); 
+% % 
+% % legend('Azimuth error of Co-Loc','Azimuth error of SS-MUSIC','Azimuth error of SPICE','Azimuth error of MUSIC','Azimuth error of I-SSMUSIC' ,'Location','southeast','FontSize', 14, 'FontName', 'Arial', 'Interpreter', 'latex')
+% % title('');
+% % 
+% % %     set(gca, 'FontName', 'Helvetica', 'FontWeight', 'bold','FontSize', 16); 
+% % %     legend('Ant 1','Ant 2','Ant 3','Ant 4','Ant 5','Ant 6','Location','southeast','FontSize', 14, 'FontName', 'Helvetica')
+% % ax = gcf;
+% % str=strcat('.\Results\','SS-MUSIC I-MUSIC1-2','.pdf');
+% % exportgraphics(ax, str,'ContentType','vector');
+% 
+% 
+% 
+% 
+% 
+% 
+% 
+% 
+% 
+% 
+% 
+% 
+% 
+% %%
+% 
+% theta_gt_1_5 = theta_gt(:,[1:11,14:21]); 
+% phi_gt_1_5 = phi_gt(:,[1:11,14:21]);
+% 
+% mark_peak_theta1 = fliplr(rot90(reshape(mark_peak(1:40,1),[4,10])));
+% mark_peak_phi1 = fliplr(rot90(reshape(mark_peak(1:40,2),[4,10])));
+% 
+% mark_peak_theta2 = fliplr(rot90(reshape(mark_peak(41:80,1),[4,10])));
+% mark_peak_phi2 = fliplr(rot90(reshape(mark_peak(41:80,2),[4,10])));
+% 
+% mark_peak_theta3 = fliplr(rot90(reshape(mark_peak(81:110,1),[3,10])));
+% mark_peak_phi3 = fliplr(rot90(reshape(mark_peak(81:110,2),[3,10])));
+% 
+% mark_peak_theta4 = fliplr(rot90(reshape(mark_peak(111:150,1),[4,10])));
+% mark_peak_phi4 = fliplr(rot90(reshape(mark_peak(111:150,2),[4,10])));
+% 
+% mark_peak_theta5 = fliplr(rot90(reshape(mark_peak(151:190,1),[4,10])));
+% mark_peak_phi5 = fliplr(rot90(reshape(mark_peak(151:190,2),[4,10])));
+% 
+% mark_peak_theta6 = fliplr(rot90(reshape(mark_peak(191:210,1),[2,10])));
+% mark_peak_phi6 = fliplr(rot90(reshape(mark_peak(191:210,2),[2,10])));
+% %% 误差比较 CDF图
+% mark_peak_theta1_5 = [mark_peak_theta3,mark_peak_theta2,mark_peak_theta1, mark_peak_theta5,mark_peak_theta4];
+% mark_peak_phi1_5 = [mark_peak_phi3,mark_peak_phi2,mark_peak_phi1, mark_peak_phi5,mark_peak_phi4];
+% mark_peak_theta1_6 = [mark_peak_theta3,mark_peak_theta2,mark_peak_theta1, mark_peak_theta6, mark_peak_theta5,mark_peak_theta4];
+% mark_peak_phi1_6 = [mark_peak_phi3,mark_peak_phi2,mark_peak_phi1, mark_peak_phi6, mark_peak_phi5,mark_peak_phi4];
+% %% 前五部分的
+% % theta_gt_1_5_errormat = abs(theta_gt_1_5 - mark_peak_theta1_5);
+% % phi_gt_1_5_errormat = abs(phi_gt_1_5 - mark_peak_phi1_5);
+% % 
+% % index_phi = find(phi_gt_1_5_errormat (:)>180);
+% % phi_gt_1_5_errormat(index_phi) = abs(phi_gt_1_5_errormat(index_phi) - 360);
+% % phi_gt_1_5_errormat(5,11) = 0;
+% % 
+% % theta_gt_1_5_errormat(5,11) = 0;
+% % figure % 误差图
+% % imagesc(theta_gt_1_5_errormat);
+% % title("error of \theta");
+% % colorbar
+% % set(gcf,'Position',[100, 100, 1000, 500]);
+% % figure 
+% % imagesc(phi_gt_1_5_errormat);
+% % title("error of \phi");
+% % colorbar
+% % set(gcf,'Position',[100, 100, 1000, 500]);
+% % 
+% % error_theta = vec(theta_gt_1_5_errormat);
+% % error_phi = vec(phi_gt_1_5_errormat);
+% 
+% %% 所有的
+% theta_gt_1_6_errormat = abs(theta_gt - mark_peak_theta1_6);
+% phi_gt_1_6_errormat = abs(phi_gt - mark_peak_phi1_6);
+% 
+% index_phi = find(phi_gt_1_6_errormat (:)>180);
+% phi_gt_1_6_errormat(index_phi) = abs(phi_gt_1_6_errormat(index_phi) - 360);
+% phi_gt_1_6_errormat(5,11) = 0;
+% 
+% theta_gt_1_6_errormat(5,11) = 0;
+% figure % 误差图
+% imagesc(theta_gt_1_6_errormat);
+% brightMap = 0.85*colormap('parula') + 0.15 * colormap('jet') ;  % Blend with white (lighter colors)
+% colormap(brightMap);
+% 
+% title("error of elevation \theta");
+% colorbar
+% set(gcf,'Position',[100, 100, 1000, 500]);
+% set(gca,'FontSize', 12, 'FontName', 'Arial');
+% ylabel('Z (cm)');
+% xlabel('X (cm)');
+% xticklabels({ '-180', '-160','-120','-80','-20', '20', '60', '100','140','180'});
+% yticklabels({'1970', '1770', '1570', '1370', '1170','970','770','570','370','170'});
+% 
+% % ax = gcf;
+% % str=strcat(save_path,'error of elevation','.pdf');
+% % exportgraphics(ax, str,'ContentType','vector');
+% 
+% 
+% figure 
+% imagesc(phi_gt_1_6_errormat);
+% % colormap('parula');
+% 
+% colormap(brightMap);
+% title("error of azimuth \phi");
+% colorbar
+% set(gcf,'Position',[100, 100, 1000, 500]);
+% set(gca,'FontSize', 12, 'FontName', 'Arial');
+% ylabel('Z (cm)');
+% xlabel('X (cm)');
+% xticklabels({ '-180', '-160','-120','-80','-20', '20', '60', '100','140','180'});
+% yticklabels({'1970', '1770', '1570', '1370', '1170','970','770','570','370','170'});
+% 
+% error_theta = vec(theta_gt_1_6_errormat);
+% error_phi = vec(phi_gt_1_6_errormat);
+% 
+% % ax = gcf;
+% % str=strcat(save_path,'error of azimuth','.pdf');
+% % exportgraphics(ax, str,'ContentType','vector');
+% 
+% %%
+% save_path = '.\Results\';
+% figure
+% h1=cdfplot(error_theta);
+% set(h1,'LineWidth',2.2,'LineStyle', '--', 'Color', [0,0,1]);
+% hold on
+% h2=cdfplot(error_phi);
+% set(h2,'LineWidth',2.2,'LineStyle', '--', 'Color', [1,0.25,0.85]);
+% box on
+% xlim([0,10]);
+% xticks(0:1:10)
+% yticks(0:0.1:1)
+% ylabel('CDF');
+% xlabel('AoA error (degree)');
+% set(gca,'FontSize', 14, 'FontName', 'Arial');
+% legend('Elevation AoA error of URA','Azimuth AoA error of URA','Location','southeast','FontSize', 14, 'FontName', 'Arial')
+% title('');
+% 
+% % ax = gcf;
+% % str=strcat(save_path,'AoA error','.pdf');
+% % exportgraphics(ax, str,'ContentType','vector');
+% 
+% theta_gt_1_5_errormat = abs(theta_gt_1_5 - mark_peak_theta1_5);
+% phi_gt_1_5_errormat = abs(phi_gt_1_5 - mark_peak_phi1_5);
+% 
+% 
+% % %% 存储
+% % save('all.mat');
+% 
+% % load("theta_phi1.mat");
+
+%% 学习一下原来的spotfi中的峰值寻找算法。
+
+
+
+function [cooked_csi_y] = cook_csi(csi_all, Mx, My, N) 
+    N = 30;
+    num_packets = size(csi_all,1);
+    csi = zeros(Mx*My*N, num_packets);
+    for p = 1:num_packets
+        xx = csi_all{p};
+        for i=1:size(xx,1)
+            a = xx(i,:).';
+            csi((i-1)*N+1:i*N, p) = a; % 只取第15个 
+        end
+    end
+%     smoothed_csi_y = smooth_csi_y(csi, Mx, My, N);
+    cooked_csi_y = csi;
+end  
+
+
+function smoothed_csi = smooth_csi_y(csi_y, Mx, My, N)         
+    y = csi_y; 
+    num_packets = size(csi_y,2); 
+    Mx_s = 2;
+    My_s = 3;
+    if N==1
+        N_s = 1;
+        Y = zeros(num_packets,(N_s)*Mx_s*My_s,((Mx-Mx_s)+1)*((My-My_s)+1)*(N_s));
+        y_ = y.';
+        CSI_matrix = reshape(y_, num_packets, N*Mx, My);
+        for p = 1:num_packets
+            CSI_single = squeeze(CSI_matrix(p,:,:));
+            CSI_smoothed = zeros((N_s)*Mx_s*My_s,((Mx-Mx_s)+1)*((My-My_s)+1)*(N_s));
+            tmp = 1;
+            for x_i = 1: Mx-Mx_s+1      % x有两次选择次数 
+                for y_j = 1:My-My_s+1   % y有两次选择次数 
+                    B = CSI_single( (x_i-1)*N+1:(x_i+(Mx_s-1))*N, y_j:y_j+(My_s-1));
+                    CSI_Block = B(:);
+
+                    CSI_smoothed(:,tmp) = CSI_Block;
+                    tmp = tmp + 1;
+                end
+            end
+            Y(p,:,:) = CSI_smoothed;
+        end
+    end
+    smoothed_csi = Y; 
+end
+
+
+
+
+
